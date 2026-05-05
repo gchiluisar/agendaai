@@ -1,1 +1,0 @@
-Leer antes de iniciar
