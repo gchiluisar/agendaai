@@ -1,873 +1,946 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Mic, Calendar as CalendarIcon, CheckSquare, MessageSquare, 
-  Plus, Settings, ChevronLeft, ChevronRight, Loader2, X,
-  Clock, AlignLeft, Send, Bell, Check,
-  Timer, Play, Pause, RotateCcw, BrainCircuit, Sparkles
-} from 'lucide-react';
-
-// --- UTILIDADES DE FECHA ---
-const getWeekNumber = (date) => {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  const dayNum = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-};
-
-const formatDate = (date) => {
-  const options = { weekday: 'long', day: 'numeric', month: 'long' };
-  return date.toLocaleDateString('es-ES', options).replace(/^\w/, (c) => c.toUpperCase());
-};
-
-const formatTime = (hour, minute = '00') => {
-  return `${hour.toString().padStart(2, '0')}:${minute}`;
-};
-
-const notificationLabels = {
-  'none': 'Sin notificación',
-  '0m': 'A la hora exacta',
-  '5m': '5 min antes',
-  '15m': '15 min antes',
-  '30m': '30 min antes',
-  '1h': '1 hora antes',
-  '1d': '1 día antes'
-};
-
-// --- COMPONENTE PRINCIPAL ---
-export default function App() {
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [activeTab, setActiveTab] = useState('agenda'); // agenda, tasks, pomodoro, coach
-  const [agendaView, setAgendaView] = useState('day'); // day, week, month, gantt
-  const [isRecording, setIsRecording] = useState(false);
-  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
-  const [events, setEvents] = useState([
-    { id: 1, title: 'Reunión de Diseño UI', date: new Date().toISOString().split('T')[0], startTime: '09:00', duration: 60, type: 'Evento', notification: '15m' },
-    { id: 2, title: 'Revisar correos', date: new Date().toISOString().split('T')[0], startTime: '11:30', duration: 30, type: 'Tarea', notification: 'none' },
-    { id: 3, title: 'Almuerzo', date: new Date().toISOString().split('T')[0], startTime: '13:00', duration: 60, type: 'Evento', notification: '0m' },
-  ]);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [voiceFeedback, setVoiceFeedback] = useState('');
-  
-  // NUEVOS ESTADOS PARA EL FLUJO DE CONFIRMACIÓN
-  const [pendingEvent, setPendingEvent] = useState(null);
-  const [isEditingPending, setIsEditingPending] = useState(false);
-  const [pendingNotes, setPendingNotes] = useState('');
-  const [categories, setCategories] = useState(['Evento', 'Tarea']);
-  const [isAddingCategory, setIsAddingCategory] = useState(false);
-  const [newCategoryName, setNewCategoryName] = useState('');
-  
-  // Asesor / Coach IA
-  const [advisorMessages, setAdvisorMessages] = useState([
-    { role: 'assistant', text: '¡Hola! Soy tu Coach de Productividad. Además de ayudarte a agendar, estoy aquí para optimizar tu tiempo. Puedes usar el botón superior para que analice tu día.' }
-  ]);
-  const [chatInput, setChatInput] = useState('');
-  const [isAdvisorThinking, setIsAdvisorThinking] = useState(false);
-
-  // Estados del Pomodoro
-  const [pomodoroTime, setPomodoroTime] = useState(25 * 60);
-  const [isPomodoroActive, setIsPomodoroActive] = useState(false);
-  const [pomodoroMode, setPomodoroMode] = useState('focus'); // focus, break
-
-  const apiKey = ""; // El entorno provee la key en tiempo de ejecución.
-
-  // --- LÓGICA POMODORO ---
-  useEffect(() => {
-    let interval = null;
-    if (isPomodoroActive && pomodoroTime > 0) {
-      interval = setInterval(() => {
-        setPomodoroTime(prev => prev - 1);
-      }, 1000);
-    } else if (pomodoroTime === 0) {
-      setIsPomodoroActive(false);
-      // Auto-cambiar de modo al terminar
-      if (pomodoroMode === 'focus') {
-        setPomodoroMode('break');
-        setPomodoroTime(5 * 60);
-        setVoiceFeedback('¡Buen trabajo! Hora de un breve descanso.');
-      } else {
-        setPomodoroMode('focus');
-        setPomodoroTime(25 * 60);
-        setVoiceFeedback('Descanso terminado. ¡A enfocarse!');
-      }
-      setTimeout(() => setVoiceFeedback(''), 4000);
-    }
-    return () => clearInterval(interval);
-  }, [isPomodoroActive, pomodoroTime, pomodoroMode]);
-
-  const formatPomodoro = (seconds) => {
-    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-    const s = (seconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  };
-
-  // --- LÓGICA DE RECONOCIMIENTO DE VOZ E IA ---
-  const handleVoiceCommand = () => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Tu navegador no soporta el reconocimiento de voz. Intenta en Chrome o Edge.");
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'es-ES';
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsRecording(true);
-      setVoiceFeedback('Escuchando...');
-    };
-
-    recognition.onresult = async (event) => {
-      const transcript = event.results[0][0].transcript;
-      setIsRecording(false);
-      setVoiceFeedback(`Procesando: "${transcript}"`);
-      setIsProcessingVoice(true);
-      
-      await processUserIntent(transcript, true);
-    };
-
-    recognition.onerror = (event) => {
-      console.error('Error de reconocimiento de voz:', event.error);
-      setIsRecording(false);
-      setVoiceFeedback('Error al escuchar. Intenta de nuevo.');
-      setTimeout(() => setVoiceFeedback(''), 3000);
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
-    recognition.start();
-  };
-
-  // --- LÓGICA UNIFICADA DE IA (VOZ Y TEXTO) ---
-  const processUserIntent = async (text, isVoice = false) => {
-    if (!text.trim()) return;
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Agenda Inteligente IA</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
     
-    if (!isVoice) {
-      setChatInput('');
-      setAdvisorMessages(prev => [...prev, { role: 'user', text }]);
-      setIsAdvisorThinking(true);
-    }
-
-    try {
-      const todayStr = currentDate.toISOString().split('T')[0];
-      const todaysEvents = events.filter(e => e.date === todayStr);
-      const eventsContext = JSON.stringify(todaysEvents);
-
-      const payload = {
-        contents: [{ parts: [{ text: text }] }],
-        systemInstruction: {
-          parts: [{ text: `Eres un Coach de Productividad y organizador de tiempo personal minimalista. Fecha actual: ${todayStr}. Tu memoria de la agenda de hoy es: ${eventsContext}.
-          INSTRUCCIONES:
-          1. Si el usuario pide agendar, registrar o crear una actividad/tarea, extrae la información. Asume hoy si no dice fecha, y 60 min si no dice duración. Devuelve action="schedule", el objeto "event" con los datos, y en "message" pregúntale si desea agregar una nota adicional.
-          2. Si el usuario pide un análisis o consejo, evalúa su agenda: busca huecos libres, identifica si hay saturación (muchas tareas seguidas) y sugiere cómo y cuándo usar la técnica Pomodoro o tomar pausas activas.
-          3. Si hace una pregunta general, responde motivando y dando consejos prácticos de gestión del tiempo. Devuelve action="chat".
-          SIEMPRE responde ÚNICAMENTE con un JSON válido usando esta estructura:
-          {
-            "action": "schedule" o "chat",
-            "message": "tu respuesta amigable y de coach",
-            "event": { "title": "...", "date": "YYYY-MM-DD", "startTime": "HH:MM", "duration": 60, "type": "Evento", "notification": "15m" }
-          }` }]
-        },
-        generationConfig: { responseMimeType: "application/json" }
-      };
-
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json();
-      const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (resultText) {
-        const parsedData = JSON.parse(resultText);
-      
-      setAdvisorMessages(prev => [...prev, { role: 'assistant', text: parsedData.message }]);
-      if (isVoice) setActiveTab('coach'); // Ir al chat para ver el contexto
-
-      if (parsedData.action === 'schedule' && parsedData.event) {
-        setPendingEvent({ 
-          ...parsedData.event, 
-          notification: parsedData.event.notification || '15m', 
-          type: parsedData.event.type || 'Evento',
-          id: Date.now() 
-        });
-        
-        // Auto-agregar categoría si la IA sugiere una nueva
-        if (parsedData.event.type && !categories.includes(parsedData.event.type) && parsedData.event.type !== 'event' && parsedData.event.type !== 'task') {
-          if(!categories.includes(parsedData.event.type)) {
-            setCategories(prev => [...prev, parsedData.event.type]);
-          }
-        }
-        
-        setPendingNotes('');
-        setIsEditingPending(false);
-        setIsAddingCategory(false);
-      } else if (isVoice) {
-        setVoiceFeedback('Respuesta en el Asesor IA');
-      }
-    }
-  } catch (error) {
-      console.error('Error procesando IA:', error);
-      setAdvisorMessages(prev => [...prev, { role: 'assistant', text: 'Lo siento, tuve un problema al procesar tu solicitud.' }]);
-      if (isVoice) setVoiceFeedback('Error al procesar.');
-    } finally {
-      setIsAdvisorThinking(false);
-      setIsProcessingVoice(false);
-      setTimeout(() => setVoiceFeedback(''), 3000);
-    }
-  };
-
-  const handleAskAdvisor = () => {
-    processUserIntent(chatInput, false);
-  };
-
-  const handleAnalyzeDay = () => {
-    processUserIntent("Analiza mi agenda de hoy y dame 3 consejos rápidos como mi coach para optimizar mi tiempo y evitar el agotamiento mental.", false);
-  };
-
-  // --- NAVEGACIÓN DÍAS ---
-  const changeDate = (days) => {
-    const newDate = new Date(currentDate);
-    newDate.setDate(newDate.getDate() + days);
-    setCurrentDate(newDate);
-  };
-
-  // --- RENDERIZADO DE VISTAS ---
-  const renderAgenda = () => {
-    const hours = Array.from({ length: 24 }, (_, i) => i);
-    const todayStr = currentDate.toISOString().split('T')[0];
-    const todaysEvents = events.filter(e => e.date === todayStr);
-
-    const renderDayView = () => (
-      <div className="relative mt-2">
-        {hours.map(hour => (
-          <div key={hour} className="flex relative min-h-[60px] border-b border-gray-100/80">
-            <div className="w-16 pt-2 text-xs text-gray-400 font-medium text-right pr-4">
-              {formatTime(hour)}
-            </div>
-            <div className="flex-1 relative">
-              {/* Renderizar eventos */}
-              {todaysEvents.filter(e => parseInt(e.startTime.split(':')[0]) === hour).map(event => {
-                const minutes = parseInt(event.startTime.split(':')[1]);
-                const top = (minutes / 60) * 100;
-                const height = (event.duration / 60) * 60; // 60px per hour
-                
-                return (
-                  <div 
-                    key={event.id}
-                    className="absolute left-2 right-2 rounded-xl p-3 text-sm shadow-sm border transition-transform hover:scale-[1.01]"
-                    style={{ 
-                      top: `${top}%`, 
-                      height: `${Math.max(height, 40)}px`,
-                      backgroundColor: event.type === 'Evento' || event.type === 'event' ? '#F3F4F6' : '#EFF6FF',
-                      borderColor: event.type === 'Evento' || event.type === 'event' ? '#E5E7EB' : '#DBEAFE',
-                      borderLeftWidth: '4px',
-                      borderLeftColor: event.type === 'Evento' || event.type === 'event' ? '#9CA3AF' : '#3B82F6',
-                      zIndex: 10
-                    }}
-                  >
-                    <p className="font-semibold text-gray-800 leading-tight truncate">{event.title}</p>
-                    <p className="text-xs text-gray-500 mt-1">{event.startTime} - {event.duration} min</p>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-        {/* Línea de tiempo actual (si es hoy) */}
-        {currentDate.toDateString() === new Date().toDateString() && (
-          <div 
-            className="absolute left-16 right-0 border-t-2 border-red-400 z-20 flex items-center"
-            style={{ top: `${(new Date().getHours() * 60 + new Date().getMinutes())}px` }} 
-          >
-            <div className="w-2 h-2 rounded-full bg-red-400 -ml-1"></div>
-          </div>
-        )}
-      </div>
-    );
-
-    const renderWeekView = () => {
-      const curr = new Date(currentDate);
-      const first = curr.getDate() - curr.getDay() + (curr.getDay() === 0 ? -6 : 1);
-      const weekDays = Array.from({length: 7}, (_, i) => new Date(new Date(curr).setDate(first + i)));
-
-      return (
-        <div className="mt-4 space-y-3">
-          {weekDays.map(day => {
-            const dateStr = day.toISOString().split('T')[0];
-            const dayEvents = events.filter(e => e.date === dateStr);
-            const isToday = dateStr === new Date().toISOString().split('T')[0];
-            return (
-              <div key={dateStr} className={`p-4 rounded-2xl border ${isToday ? 'border-zinc-900 bg-gray-50/50' : 'border-gray-100 bg-white'} shadow-sm`}>
-                <div className="flex justify-between items-center mb-3">
-                  <span className={`font-semibold capitalize ${isToday ? 'text-zinc-900' : 'text-gray-700'}`}>
-                    {day.toLocaleDateString('es-ES', {weekday: 'long', day: 'numeric'})}
-                  </span>
-                  <span className="text-xs font-medium text-gray-400 bg-gray-100 px-2 py-1 rounded-full">{dayEvents.length}</span>
-                </div>
-                <div className="space-y-2">
-                  {dayEvents.length === 0 ? (
-                    <p className="text-xs text-gray-400 italic">Sin tareas</p>
-                  ) : (
-                    dayEvents.map(e => (
-                      <div key={e.id} className="text-sm px-3 py-2 bg-gray-100/80 rounded-xl truncate flex items-center">
-                        <span className="text-xs font-medium text-gray-500 w-12">{e.startTime}</span>
-                        <div className={`w-1.5 h-1.5 rounded-full mr-2 ${e.type === 'Evento' || e.type === 'event' ? 'bg-gray-400' : 'bg-blue-400'}`}></div>
-                        <span className="truncate">{e.title}</span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      );
-    };
-
-    const renderMonthView = () => {
-      const year = currentDate.getFullYear();
-      const month = currentDate.getMonth();
-      const daysInMonth = new Date(year, month + 1, 0).getDate();
-      const firstDay = new Date(year, month, 1).getDay();
-      const offset = firstDay === 0 ? 6 : firstDay - 1;
-
-      const days = Array.from({ length: daysInMonth }, (_, i) => i + 1);
-      const blanks = Array.from({ length: offset }, (_, i) => i);
-
-      return (
-        <div className="mt-4 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-          <div className="grid grid-cols-7 gap-1 mb-2">
-            {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => (
-              <div key={d} className="text-center text-xs font-bold text-gray-400 pb-2">{d}</div>
-            ))}
-          </div>
-          <div className="grid grid-cols-7 gap-1">
-            {blanks.map(b => <div key={`blank-${b}`} className="h-14"></div>)}
-            {days.map(d => {
-              const dateStr = `${year}-${String(month+1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-              const dayEvents = events.filter(e => e.date === dateStr);
-              const isToday = dateStr === new Date().toISOString().split('T')[0];
-              
-              return (
-                <div key={d} className={`h-14 rounded-xl p-1 flex flex-col items-center justify-start transition-colors ${isToday ? 'bg-zinc-900 text-white shadow-md' : 'bg-gray-50/50 hover:bg-gray-100 border border-gray-50'}`}>
-                  <span className={`text-xs font-medium mt-1 ${isToday ? 'text-white' : 'text-gray-700'}`}>{d}</span>
-                  <div className="flex flex-wrap justify-center gap-0.5 mt-1 px-1 w-full overflow-hidden h-4">
-                    {dayEvents.slice(0,3).map((e, i) => (
-                      <div key={i} className={`w-1.5 h-1.5 rounded-full ${isToday ? 'bg-white' : (e.type === 'Evento' || e.type === 'event' ? 'bg-gray-400' : 'bg-blue-400')}`}></div>
-                    ))}
-                    {dayEvents.length > 3 && <span className="text-[8px] leading-none text-gray-400">+</span>}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      );
-    };
-
-    const renderGanttView = () => {
-      return (
-        <div className="mt-4 bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
-          <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-            <h3 className="text-sm font-semibold text-gray-700">Línea de tiempo de hoy</h3>
-          </div>
-          <div className="overflow-x-auto hide-scrollbar relative p-4">
-            <div className="min-w-[600px]">
-              {/* Horas (Eje X) */}
-              <div className="flex border-b border-gray-200 ml-28 pb-2">
-                {hours.filter(h => h >= 6 && h <= 22).map(h => (
-                  <div key={h} className="flex-1 text-xs text-gray-400 font-medium min-w-[45px] border-l border-gray-100 pl-1">{h}:00</div>
-                ))}
-              </div>
-              {/* Tareas (Filas) */}
-              <div className="mt-2 relative">
-                {/* Cuadrícula de fondo */}
-                <div className="absolute inset-0 ml-28 flex pointer-events-none">
-                  {hours.filter(h => h >= 6 && h <= 22).map(h => (
-                    <div key={h} className="flex-1 border-l border-gray-50 min-w-[45px]"></div>
-                  ))}
-                </div>
-                
-                {todaysEvents.length === 0 && <p className="text-sm text-gray-400 py-6 text-center">No hay eventos para graficar hoy.</p>}
-                
-                {todaysEvents.sort((a,b) => a.startTime.localeCompare(b.startTime)).map(event => {
-                  const startHour = parseInt(event.startTime.split(':')[0]) + parseInt(event.startTime.split(':')[1])/60;
-                  const visibleStart = Math.max(0, startHour - 6); 
-                  const totalVisibleHours = 22 - 6 + 1; 
-                  const left = (visibleStart / totalVisibleHours) * 100;
-                  const width = (event.duration / 60 / totalVisibleHours) * 100;
-                  
-                  return (
-                    <div key={event.id} className="flex items-center mt-3 h-10 relative z-10 hover:bg-gray-50 transition-colors rounded-lg">
-                      <div className="w-28 text-xs font-semibold text-gray-700 truncate pr-3 bg-white py-2">{event.title}</div>
-                      <div className="flex-1 relative h-full">
-                        {startHour >= 6 && startHour <= 22 && (
-                          <div 
-                            className={`absolute h-7 top-1.5 rounded-md shadow-sm border ${event.type === 'Evento' || event.type === 'event' ? 'bg-gray-100 border-gray-200' : 'bg-blue-100 border-blue-200'} flex items-center px-2 overflow-hidden cursor-pointer hover:opacity-80 transition-opacity`}
-                            style={{ left: `${left}%`, width: `${width}%`, minWidth: '20px' }}
-                          >
-                            <span className="text-[10px] font-medium text-gray-600 truncate">{event.duration}m</span>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    };
-
-    const viewOptions = [
-      { id: 'day', label: 'Día' },
-      { id: 'week', label: 'Semana' },
-      { id: 'month', label: 'Mes' },
-      { id: 'gantt', label: 'Gantt' }
-    ];
-
-    return (
-      <div className="flex-1 overflow-y-auto bg-gray-50/50 pb-24 px-4 pt-4 relative">
-        <div className="flex flex-col bg-white p-4 rounded-2xl shadow-sm border border-gray-100 sticky top-0 z-30">
-          <div className="flex justify-between items-center">
-            <button onClick={() => changeDate(agendaView === 'month' ? -30 : agendaView === 'week' ? -7 : -1)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ChevronLeft size={20} /></button>
-            <div className="text-center">
-              <h2 className="text-lg font-bold text-gray-900">
-                {agendaView === 'month' 
-                  ? currentDate.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }).replace(/^\w/, c => c.toUpperCase())
-                  : formatDate(currentDate)}
-              </h2>
-              <span className="text-xs font-medium text-gray-500 uppercase tracking-wider">Semana {getWeekNumber(currentDate)}</span>
-            </div>
-            <button onClick={() => changeDate(agendaView === 'month' ? 30 : agendaView === 'week' ? 7 : 1)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ChevronRight size={20} /></button>
-          </div>
-          
-          {/* Selector de vistas */}
-          <div className="flex space-x-2 mt-4 bg-gray-50 p-1 rounded-xl">
-            {viewOptions.map(view => (
-              <button 
-                key={view.id}
-                onClick={() => setAgendaView(view.id)}
-                className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  agendaView === view.id ? 'bg-white text-zinc-900 shadow-sm border border-gray-200' : 'text-gray-500 hover:text-gray-700'
-                }`}
-              >
-                {view.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="mt-2">
-          {agendaView === 'day' && renderDayView()}
-          {agendaView === 'week' && renderWeekView()}
-          {agendaView === 'month' && renderMonthView()}
-          {agendaView === 'gantt' && renderGanttView()}
-        </div>
-      </div>
-    );
-  };
-
-  const renderPomodoro = () => (
-    <div className="flex-1 flex flex-col items-center justify-center p-6 bg-white pb-24 relative overflow-hidden">
-      {/* Elemento decorativo de fondo */}
-      <div className="absolute top-0 right-0 w-64 h-64 bg-gray-50 rounded-full blur-3xl opacity-50 -translate-y-1/2 translate-x-1/2"></div>
-      
-      <div className="w-full max-w-sm z-10 flex flex-col items-center mt-[-10vh]">
-        <h2 className="text-2xl font-bold text-gray-900 mb-1">Modo Enfoque</h2>
-        <p className="text-sm text-gray-500 mb-10 text-center">Técnica Pomodoro para maximizar tu concentración.</p>
-
-        <div className="flex space-x-3 mb-10 bg-gray-50 p-1.5 rounded-2xl">
-            <button onClick={() => { setPomodoroMode('focus'); setPomodoroTime(25*60); setIsPomodoroActive(false); }} className={`px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${pomodoroMode === 'focus' ? 'bg-white text-zinc-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>25m Enfoque</button>
-            <button onClick={() => { setPomodoroMode('break'); setPomodoroTime(5*60); setIsPomodoroActive(false); }} className={`px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${pomodoroMode === 'break' ? 'bg-white text-zinc-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>5m Descanso</button>
-        </div>
-
-        <div className="relative mb-12 flex flex-col items-center justify-center group">
-          {/* Círculo animado exterior */}
-          {isPomodoroActive && (
-            <div className="absolute inset-0 -m-8 border-2 border-zinc-100 rounded-full animate-[spin_10s_linear_infinite] border-t-zinc-900/20"></div>
-          )}
-          <span className="text-7xl font-light tabular-nums tracking-tighter text-zinc-900 font-sans">
-            {formatPomodoro(pomodoroTime)}
-          </span>
-        </div>
-
-        <div className="flex items-center space-x-6">
-          <button 
-            onClick={() => { setIsPomodoroActive(false); setPomodoroTime(pomodoroMode === 'focus' ? 25*60 : 5*60); }} 
-            className="w-14 h-14 bg-white border border-gray-100 text-gray-500 rounded-full flex items-center justify-center shadow-sm hover:bg-gray-50 transition-colors"
-          >
-            <RotateCcw size={22} />
-          </button>
-          <button 
-            onClick={() => setIsPomodoroActive(!isPomodoroActive)} 
-            className={`w-20 h-20 text-white rounded-full flex items-center justify-center shadow-xl transition-all duration-300 hover:scale-105 ${isPomodoroActive ? 'bg-zinc-800' : 'bg-zinc-900'}`}
-          >
-            {isPomodoroActive ? <Pause size={32} /> : <Play size={32} className="ml-2" />}
-          </button>
-        </div>
-        
-        <div className="mt-12 bg-blue-50/50 p-4 rounded-2xl border border-blue-100/50 flex items-start space-x-3 w-full">
-            <Sparkles size={20} className="text-blue-500 flex-shrink-0 mt-0.5" />
-            <p className="text-xs text-blue-800 leading-relaxed">
-                <strong>Tip del Coach:</strong> Durante el enfoque, aparta tu teléfono y cierra pestañas innecesarias. 25 minutos de atención plena equivalen a 2 horas de trabajo distraído.
-            </p>
-        </div>
-      </div>
-    </div>
-  );
-
-  const renderCoach = () => {
-    return (
-      <div className="flex-1 flex flex-col bg-white pb-24">
-        <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
-          <div className="flex justify-between items-start">
-            <div>
-              <h2 className="text-2xl font-bold text-gray-900">Coach IA</h2>
-              <p className="text-sm text-gray-500 mt-1">Tu optimizador de tiempo personal.</p>
-            </div>
-            <button 
-              onClick={handleAnalyzeDay}
-              className="bg-white border border-gray-200 text-zinc-800 px-3 py-1.5 rounded-xl text-xs font-semibold shadow-sm hover:bg-gray-50 flex items-center transition-colors"
-            >
-              <Sparkles size={14} className="mr-1.5 text-yellow-500" /> Analizar mi día
-            </button>
-          </div>
-        </div>
-        
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {advisorMessages.map((msg, idx) => (
-            <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] rounded-2xl p-4 text-sm ${
-                msg.role === 'user' 
-                  ? 'bg-zinc-900 text-white rounded-br-none' 
-                  : 'bg-gray-100 text-gray-800 rounded-bl-none'
-              }`}>
-                {msg.text}
-              </div>
-            </div>
-          ))}
-          {isAdvisorThinking && (
-            <div className="flex justify-start">
-              <div className="bg-gray-100 rounded-2xl rounded-bl-none p-4 flex items-center space-x-2">
-                <Loader2 size={16} className="animate-spin text-gray-500" />
-                <span className="text-sm text-gray-500">Analizando agenda...</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="p-4 bg-white border-t border-gray-100 relative">
-          <input 
-            type="text" 
-            value={chatInput}
-            onChange={(e) => setChatInput(e.target.value)}
-            onKeyPress={(e) => e.key === 'Enter' && handleAskAdvisor()}
-            placeholder="Ej: ¿Tengo tiempo para leer hoy?"
-            className="w-full bg-gray-50 border border-gray-200 rounded-full py-3 px-5 pr-12 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:bg-white transition-all"
-          />
-          <button 
-            onClick={handleAskAdvisor}
-            disabled={isAdvisorThinking || !chatInput.trim()}
-            className="absolute right-6 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-zinc-900 disabled:opacity-50"
-          >
-            <Send size={18} />
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  return (
-    <div className="h-screen w-full bg-white flex justify-center overflow-hidden font-sans text-gray-900">
-      {/* Contenedor simulando la pantalla del móvil */}
-      <div className="w-full max-w-md h-full flex flex-col relative shadow-2xl bg-white sm:border-x border-gray-100">
-        
-        {/* CABECERA (Header oculto en vista asesor para diseño limpio) */}
-        {activeTab !== 'coach' && activeTab !== 'pomodoro' && (
-          <header className="px-6 pt-8 pb-4 flex justify-between items-center bg-white z-10 sticky top-0">
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">Mi Agenda</h1>
-              <p className="text-sm text-gray-500 font-medium">Semana {getWeekNumber(new Date())}</p>
-            </div>
-            <button className="p-2 bg-gray-50 text-gray-600 rounded-full hover:bg-gray-100 transition-colors">
-              <Settings size={20} />
-            </button>
-          </header>
-        )}
-
-        {/* CONTENIDO PRINCIPAL */}
-        {activeTab === 'agenda' && renderAgenda()}
-        {activeTab === 'coach' && renderCoach()}
-        {activeTab === 'pomodoro' && renderPomodoro()}
-        {activeTab === 'tasks' && (
-          <div className="flex-1 p-6 overflow-y-auto pb-24">
-            <h2 className="text-xl font-bold mb-4">Todas las tareas</h2>
-            <div className="space-y-3">
-              {events.filter(e => e.type !== 'Evento' && e.type !== 'event').map(task => (
-                <div key={task.id} className="flex items-center p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
-                  <div className="w-5 h-5 rounded border-2 border-gray-300 mr-4 cursor-pointer hover:border-zinc-900 transition-colors"></div>
-                  <div>
-                    <p className="font-medium">{task.title}</p>
-                    <div className="flex items-center text-xs text-gray-400 mt-0.5 space-x-2">
-                      <span>{task.date} • {task.startTime}</span>
-                      <span className="bg-blue-50 text-blue-600 px-1.5 rounded truncate max-w-[100px]">{task.type}</span>
-                    </div>
-                    {task.notes && (
-                      <p className="text-xs text-gray-500 mt-2 bg-gray-50 p-2 rounded-lg border border-gray-100 italic">
-                        {task.notes}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {events.filter(e => e.type !== 'Evento' && e.type !== 'event').length === 0 && (
-                <p className="text-gray-400 text-center mt-10">No hay tareas pendientes.</p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* MODAL DE CONFIRMACIÓN DE EVENTO PENDIENTE */}
-        {pendingEvent && (
-          <div className="absolute inset-0 bg-black/40 z-[60] flex items-center justify-center p-4 animate-fade-in-up">
-            <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-gray-100">
-              <h3 className="text-xl font-bold text-gray-900 mb-4">
-                {isEditingPending ? 'Editar Registro' : 'Confirmar Registro'}
-              </h3>
-              
-              {isEditingPending ? (
-                <div className="space-y-3 mb-4">
-                  <div>
-                    <label className="text-xs font-semibold text-gray-500 uppercase">Título</label>
-                    <input type="text" value={pendingEvent.title} onChange={e => setPendingEvent({...pendingEvent, title: e.target.value})} className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
-                  </div>
-                  <div className="flex space-x-3">
-                    <div className="flex-1">
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Fecha</label>
-                      <input type="date" value={pendingEvent.date} onChange={e => setPendingEvent({...pendingEvent, date: e.target.value})} className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
-                    </div>
-                    <div className="flex-1">
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Hora</label>
-                      <input type="time" value={pendingEvent.startTime} onChange={e => setPendingEvent({...pendingEvent, startTime: e.target.value})} className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
-                    </div>
-                  </div>
-                  <div className="flex space-x-3">
-                    <div className="flex-1">
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Duración (min)</label>
-                      <input type="number" value={pendingEvent.duration} onChange={e => setPendingEvent({...pendingEvent, duration: parseInt(e.target.value) || 0})} className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
-                    </div>
-                    <div className="flex-1">
-                      <label className="text-xs font-semibold text-gray-500 uppercase">Tipo</label>
-                      {!isAddingCategory ? (
-                        <select 
-                          value={pendingEvent.type} 
-                          onChange={e => {
-                            if (e.target.value === 'ADD_NEW') {
-                              setIsAddingCategory(true);
-                            } else {
-                              setPendingEvent({...pendingEvent, type: e.target.value});
-                            }
-                          }} 
-                          className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none"
-                        >
-                          {categories.map(c => <option key={c} value={c}>{c}</option>)}
-                          <option value="ADD_NEW">+ Nueva categoría...</option>
-                        </select>
-                      ) : (
-                        <div className="flex items-center">
-                          <input 
-                            type="text" 
-                            value={newCategoryName} 
-                            onChange={e => setNewCategoryName(e.target.value)} 
-                            placeholder="Nuevo tipo" 
-                            autoFocus
-                            className="w-full bg-white border border-gray-200 p-2.5 rounded-l-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none text-sm" 
-                          />
-                          <button 
-                            onClick={() => {
-                              const trimmed = newCategoryName.trim();
-                              if(trimmed) {
-                                if (!categories.includes(trimmed)) setCategories([...categories, trimmed]);
-                                setPendingEvent({...pendingEvent, type: trimmed});
-                              }
-                              setIsAddingCategory(false);
-                              setNewCategoryName('');
-                            }}
-                            className="bg-zinc-900 text-white p-3 rounded-r-xl transition-colors hover:bg-zinc-800"
-                          >
-                            <Check size={14} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-xs font-semibold text-gray-500 uppercase">Notificación</label>
-                    <select 
-                      value={pendingEvent.notification || '15m'} 
-                      onChange={e => setPendingEvent({...pendingEvent, notification: e.target.value})} 
-                      className="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none"
-                    >
-                      {Object.entries(notificationLabels).map(([val, label]) => (
-                        <option key={val} value={val}>{label}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-2 mb-4 bg-gray-50 p-4 rounded-2xl border border-gray-100">
-                  <div className="flex items-start justify-between">
-                    <p className="font-bold text-gray-900">{pendingEvent.title}</p>
-                    <span className="text-[10px] font-bold uppercase tracking-wider bg-zinc-200 text-zinc-700 px-2 py-1 rounded-md truncate max-w-[100px]">
-                      {pendingEvent.type}
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap items-center text-sm text-gray-600 mt-2 gap-3">
-                    <span className="flex items-center"><CalendarIcon size={14} className="mr-1" /> {pendingEvent.date}</span>
-                    <span className="flex items-center"><Clock size={14} className="mr-1" /> {pendingEvent.startTime} ({pendingEvent.duration}m)</span>
-                    <span className="flex items-center w-full mt-1 text-xs"><Bell size={14} className="mr-1" /> Notificación: {notificationLabels[pendingEvent.notification || '15m']}</span>
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-4">
-                <label className="text-xs font-semibold text-gray-500 uppercase flex items-center mb-1">
-                  <AlignLeft size={12} className="mr-1" /> Notas adicionales (Opcional)
-                </label>
-                <textarea 
-                  value={pendingNotes}
-                  onChange={e => setPendingNotes(e.target.value)}
-                  placeholder="Ej: Llevar portátil, preparar informe..."
-                  className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-zinc-900 focus:outline-none resize-none"
-                  rows="2"
-                />
-              </div>
-
-              <div className="flex justify-between mt-6 space-x-2">
-                <button 
-                  onClick={() => {
-                    setPendingEvent(null);
-                    setAdvisorMessages(prev => [...prev, { role: 'assistant', text: 'Registro cancelado.' }]);
-                  }} 
-                  className="flex-1 py-3 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl font-semibold transition-colors"
-                >
-                  Cancelar
-                </button>
-                
-                {!isEditingPending && (
-                  <button 
-                    onClick={() => setIsEditingPending(true)} 
-                    className="flex-1 py-3 text-zinc-700 bg-zinc-100 hover:bg-zinc-200 border border-zinc-200 rounded-xl font-semibold transition-colors"
-                  >
-                    Editar
-                  </button>
-                )}
-                
-                <button 
-                  onClick={() => {
-                    setEvents([...events, { ...pendingEvent, notes: pendingNotes }]);
-                    setPendingEvent(null);
-                    setAdvisorMessages(prev => [...prev, { role: 'assistant', text: '¡Excelente! Lo he guardado en tu agenda.' }]);
-                  }} 
-                  className="flex-1 py-3 text-white bg-zinc-900 hover:bg-zinc-800 rounded-xl font-semibold transition-colors shadow-lg shadow-zinc-900/20"
-                >
-                  Aceptar
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* FEEDBACK DE VOZ FLOTANTE */}
-        {(isRecording || isProcessingVoice || voiceFeedback) && (
-          <div className="absolute bottom-28 left-1/2 -translate-x-1/2 bg-zinc-900 text-white px-6 py-3 rounded-full shadow-lg flex items-center space-x-3 z-50 animate-fade-in-up w-max max-w-[90%]">
-            {(isRecording || isProcessingVoice) && <Loader2 size={16} className="animate-spin" />}
-            <span className="text-sm font-medium truncate">{voiceFeedback || 'Escuchando...'}</span>
-          </div>
-        )}
-
-        {/* BOTÓN FLOTANTE (Micrófono) */}
-        <button 
-          onClick={handleVoiceCommand}
-          className={`absolute bottom-24 right-6 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl transition-all z-40 ${
-            isRecording ? 'bg-red-500 animate-pulse scale-110' : 'bg-zinc-900 hover:bg-zinc-800 hover:scale-105'
-          }`}
-        >
-          <Mic size={24} />
-        </button>
-
-        {/* NAVEGACIÓN INFERIOR (Bottom Nav) */}
-        <nav className="absolute bottom-0 w-full bg-white/80 backdrop-blur-md border-t border-gray-100 pb-safe pt-2 px-4 flex justify-between z-30">
-          <div className="flex space-x-1 flex-1 justify-around">
-            <button 
-              onClick={() => setActiveTab('agenda')}
-              className={`flex flex-col items-center p-2 transition-colors ${activeTab === 'agenda' ? 'text-zinc-900' : 'text-gray-400 hover:text-gray-600'}`}
-            >
-              <CalendarIcon size={22} strokeWidth={activeTab === 'agenda' ? 2.5 : 2} />
-              <span className="text-[10px] mt-1 font-medium">Agenda</span>
-            </button>
-            
-            <button 
-              onClick={() => setActiveTab('tasks')}
-              className={`flex flex-col items-center p-2 transition-colors ${activeTab === 'tasks' ? 'text-zinc-900' : 'text-gray-400 hover:text-gray-600'}`}
-            >
-              <CheckSquare size={22} strokeWidth={activeTab === 'tasks' ? 2.5 : 2} />
-              <span className="text-[10px] mt-1 font-medium">Tareas</span>
-            </button>
-          </div>
-
-          {/* Espaciador para no chocar con diseño flotante si lo hubiera, o para equilibrar centro */}
-          <div className="w-8 flex-shrink-0"></div>
-
-          <div className="flex space-x-1 flex-1 justify-around pr-2">
-            <button 
-              onClick={() => setActiveTab('pomodoro')}
-              className={`flex flex-col items-center p-2 transition-colors ${activeTab === 'pomodoro' ? 'text-zinc-900' : 'text-gray-400 hover:text-gray-600'}`}
-            >
-              <Timer size={22} strokeWidth={activeTab === 'pomodoro' ? 2.5 : 2} />
-              <span className="text-[10px] mt-1 font-medium">Enfoque</span>
-            </button>
-
-            <button 
-              onClick={() => setActiveTab('coach')}
-              className={`flex flex-col items-center p-2 transition-colors ${activeTab === 'coach' ? 'text-zinc-900' : 'text-gray-400 hover:text-gray-600'}`}
-            >
-              <BrainCircuit size={22} strokeWidth={activeTab === 'coach' ? 2.5 : 2} />
-              <span className="text-[10px] mt-1 font-medium">Coach</span>
-            </button>
-          </div>
-        </nav>
-
-        {/* CSS para animaciones básicas */}
-        <style dangerouslySetInnerHTML={{__html: `
-          @keyframes fadeInUp {
+    <style>
+        @keyframes fadeInUp {
             from { opacity: 0; transform: translate(-50%, 10px); }
             to { opacity: 1; transform: translate(-50%, 0); }
-          }
-          .animate-fade-in-up {
+        }
+        .animate-fade-in-up {
             animation: fadeInUp 0.3s ease-out forwards;
-          }
-          .pb-safe {
+        }
+        .pb-safe {
             padding-bottom: env(safe-area-inset-bottom, 20px);
-          }
-          .hide-scrollbar::-webkit-scrollbar {
+        }
+        .hide-scrollbar::-webkit-scrollbar {
             display: none;
-          }
-          .hide-scrollbar {
+        }
+        .hide-scrollbar {
             -ms-overflow-style: none;
             scrollbar-width: none;
-          }
-        `}} />
-      </div>
+        }
+        /* Transiciones suaves para ocultar/mostrar vistas */
+        .tab-content {
+            display: none;
+            height: 100%;
+            flex-direction: column;
+        }
+        .tab-content.active {
+            display: flex;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 h-screen w-full flex justify-center overflow-hidden font-sans text-gray-900 selection:bg-blue-200">
+
+    <!-- Contenedor principal (Simula móvil) -->
+    <div class="w-full max-w-md h-full flex flex-col relative shadow-2xl bg-white sm:border-x border-gray-100">
+        
+        <!-- CABECERA PRINCIPAL -->
+        <header id="main-header" class="px-6 pt-8 pb-4 flex justify-between items-center bg-white z-10 sticky top-0">
+            <div>
+                <h1 class="text-2xl font-bold tracking-tight">Mi Agenda</h1>
+                <p id="header-subtitle" class="text-sm text-gray-500 font-medium">Semana --</p>
+            </div>
+            <button class="p-2 bg-gray-50 text-gray-600 rounded-full hover:bg-gray-100 transition-colors">
+                <i data-lucide="settings" class="w-5 h-5"></i>
+            </button>
+        </header>
+
+        <!-- CONTENEDORES DE VISTAS (Pestañas) -->
+        <!-- 1. AGENDA -->
+        <div id="tab-agenda" class="tab-content active flex-1 overflow-y-auto bg-gray-50/50 pb-24 px-4 pt-4 relative">
+            <div class="flex flex-col bg-white p-4 rounded-2xl shadow-sm border border-gray-100 sticky top-0 z-30">
+                <div class="flex justify-between items-center">
+                    <button onclick="changeDate(-1)" class="p-2 hover:bg-gray-100 rounded-full transition-colors"><i data-lucide="chevron-left" class="w-5 h-5"></i></button>
+                    <div class="text-center">
+                        <h2 id="agenda-date-title" class="text-lg font-bold text-gray-900">Fecha</h2>
+                        <span id="agenda-week-subtitle" class="text-xs font-medium text-gray-500 uppercase tracking-wider">Semana --</span>
+                    </div>
+                    <button onclick="changeDate(1)" class="p-2 hover:bg-gray-100 rounded-full transition-colors"><i data-lucide="chevron-right" class="w-5 h-5"></i></button>
+                </div>
+                
+                <!-- Selector de vistas de agenda -->
+                <div class="flex space-x-2 mt-4 bg-gray-50 p-1 rounded-xl" id="agenda-view-selector">
+                    <button onclick="setAgendaView('day')" class="flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all bg-white text-zinc-900 shadow-sm border border-gray-200" data-view="day">Día</button>
+                    <button onclick="setAgendaView('week')" class="flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all text-gray-500 hover:text-gray-700" data-view="week">Semana</button>
+                    <button onclick="setAgendaView('month')" class="flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all text-gray-500 hover:text-gray-700" data-view="month">Mes</button>
+                    <button onclick="setAgendaView('gantt')" class="flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all text-gray-500 hover:text-gray-700" data-view="gantt">Gantt</button>
+                </div>
+            </div>
+
+            <!-- Contenedor dinámico de la agenda -->
+            <div id="agenda-container" class="mt-2"></div>
+        </div>
+
+        <!-- 2. TAREAS -->
+        <div id="tab-tasks" class="tab-content flex-1 p-6 overflow-y-auto pb-24 bg-gray-50/50">
+            <h2 class="text-xl font-bold mb-4">Todas las tareas</h2>
+            <div id="tasks-container" class="space-y-3"></div>
+        </div>
+
+        <!-- 3. POMODORO -->
+        <div id="tab-pomodoro" class="tab-content flex-1 bg-white pb-24 relative overflow-hidden items-center justify-center">
+            <div class="absolute top-0 right-0 w-64 h-64 bg-gray-50 rounded-full blur-3xl opacity-50 -translate-y-1/2 translate-x-1/2 pointer-events-none"></div>
+            
+            <div class="w-full max-w-sm z-10 flex flex-col items-center mt-[-10vh] px-6">
+                <h2 class="text-2xl font-bold text-gray-900 mb-1">Modo Enfoque</h2>
+                <p class="text-sm text-gray-500 mb-10 text-center">Técnica Pomodoro para maximizar tu concentración.</p>
+
+                <div class="flex space-x-3 mb-10 bg-gray-50 p-1.5 rounded-2xl">
+                    <button id="btn-focus-mode" onclick="setPomodoroMode('focus')" class="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all bg-white text-zinc-900 shadow-sm">25m Enfoque</button>
+                    <button id="btn-break-mode" onclick="setPomodoroMode('break')" class="px-5 py-2.5 rounded-xl text-sm font-semibold transition-all text-gray-500 hover:text-gray-700">5m Descanso</button>
+                </div>
+
+                <div class="relative mb-12 flex flex-col items-center justify-center group">
+                    <div id="pomodoro-ring" class="absolute inset-0 -m-8 border-2 border-zinc-100 rounded-full border-t-zinc-900/20 hidden"></div>
+                    <span id="pomodoro-timer-display" class="text-7xl font-light tabular-nums tracking-tighter text-zinc-900 font-sans">25:00</span>
+                </div>
+
+                <div class="flex items-center space-x-6">
+                    <button onclick="resetPomodoro()" class="w-14 h-14 bg-white border border-gray-100 text-gray-500 rounded-full flex items-center justify-center shadow-sm hover:bg-gray-50 transition-colors">
+                        <i data-lucide="rotate-ccw" class="w-6 h-6"></i>
+                    </button>
+                    <button id="btn-toggle-pomodoro" onclick="togglePomodoro()" class="w-20 h-20 text-white rounded-full flex items-center justify-center shadow-xl transition-all duration-300 hover:scale-105 bg-zinc-900">
+                        <i data-lucide="play" class="w-8 h-8 ml-2" id="pomodoro-icon"></i>
+                    </button>
+                </div>
+                
+                <div class="mt-12 bg-blue-50/50 p-4 rounded-2xl border border-blue-100/50 flex items-start space-x-3 w-full">
+                    <i data-lucide="sparkles" class="w-5 h-5 text-blue-500 flex-shrink-0 mt-0.5"></i>
+                    <p class="text-xs text-blue-800 leading-relaxed">
+                        <strong>Tip del Coach:</strong> Durante el enfoque, aparta tu teléfono y cierra pestañas innecesarias. 25 minutos de atención plena equivalen a 2 horas de trabajo distraído.
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 4. COACH IA -->
+        <div id="tab-coach" class="tab-content flex-1 bg-white pb-24">
+            <div class="p-6 border-b border-gray-100 bg-gradient-to-r from-gray-50 to-white">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-900">Coach IA</h2>
+                        <p class="text-sm text-gray-500 mt-1">Tu optimizador de tiempo personal.</p>
+                    </div>
+                    <button onclick="handleAnalyzeDay()" class="bg-white border border-gray-200 text-zinc-800 px-3 py-1.5 rounded-xl text-xs font-semibold shadow-sm hover:bg-gray-50 flex items-center transition-colors">
+                        <i data-lucide="sparkles" class="w-3.5 h-3.5 mr-1.5 text-yellow-500"></i> Analizar día
+                    </button>
+                </div>
+            </div>
+            
+            <div id="chat-messages-container" class="flex-1 overflow-y-auto p-4 space-y-4 flex flex-col">
+                <!-- Mensajes se insertan aquí -->
+            </div>
+
+            <div class="p-4 bg-white border-t border-gray-100 relative mt-auto">
+                <input type="text" id="chat-input" placeholder="Ej: ¿Tengo tiempo para leer hoy?" class="w-full bg-gray-50 border border-gray-200 rounded-full py-3 px-5 pr-12 focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:bg-white transition-all" onkeypress="handleChatKeyPress(event)">
+                <button onclick="handleAskAdvisor()" id="btn-send-chat" class="absolute right-6 top-1/2 -translate-y-1/2 p-2 text-gray-400 hover:text-zinc-900 disabled:opacity-50 transition-colors">
+                    <i data-lucide="send" class="w-4.5 h-4.5"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- FEEDBACK DE VOZ FLOTANTE -->
+        <div id="voice-feedback" class="hidden absolute bottom-28 left-1/2 -translate-x-1/2 bg-zinc-900 text-white px-6 py-3 rounded-full shadow-lg flex items-center space-x-3 z-50 animate-fade-in-up w-max max-w-[90%]">
+            <i data-lucide="loader-2" class="w-4 h-4 animate-spin hidden" id="voice-loader"></i>
+            <span id="voice-text" class="text-sm font-medium truncate">Escuchando...</span>
+        </div>
+
+        <!-- BOTÓN FLOTANTE (Micrófono) -->
+        <button id="btn-mic" onclick="handleVoiceCommand()" class="absolute bottom-24 right-6 w-14 h-14 rounded-full flex items-center justify-center text-white shadow-xl transition-all z-40 bg-zinc-900 hover:bg-zinc-800 hover:scale-105">
+            <i data-lucide="mic" class="w-6 h-6"></i>
+        </button>
+
+        <!-- NAVEGACIÓN INFERIOR (Bottom Nav) -->
+        <nav class="absolute bottom-0 w-full bg-white/80 backdrop-blur-md border-t border-gray-100 pb-safe pt-2 px-4 flex justify-between z-30">
+            <div class="flex space-x-1 flex-1 justify-around">
+                <button onclick="switchTab('agenda')" class="nav-btn flex flex-col items-center p-2 transition-colors text-zinc-900" data-tab="agenda">
+                    <i data-lucide="calendar" class="w-[22px] h-[22px]"></i>
+                    <span class="text-[10px] mt-1 font-medium">Agenda</span>
+                </button>
+                
+                <button onclick="switchTab('tasks')" class="nav-btn flex flex-col items-center p-2 transition-colors text-gray-400 hover:text-gray-600" data-tab="tasks">
+                    <i data-lucide="check-square" class="w-[22px] h-[22px]"></i>
+                    <span class="text-[10px] mt-1 font-medium">Tareas</span>
+                </button>
+            </div>
+
+            <div class="w-8 flex-shrink-0"></div>
+
+            <div class="flex space-x-1 flex-1 justify-around pr-2">
+                <button onclick="switchTab('pomodoro')" class="nav-btn flex flex-col items-center p-2 transition-colors text-gray-400 hover:text-gray-600" data-tab="pomodoro">
+                    <i data-lucide="timer" class="w-[22px] h-[22px]"></i>
+                    <span class="text-[10px] mt-1 font-medium">Enfoque</span>
+                </button>
+
+                <button onclick="switchTab('coach')" class="nav-btn flex flex-col items-center p-2 transition-colors text-gray-400 hover:text-gray-600" data-tab="coach">
+                    <i data-lucide="brain-circuit" class="w-[22px] h-[22px]"></i>
+                    <span class="text-[10px] mt-1 font-medium">Coach</span>
+                </button>
+            </div>
+        </nav>
+
+        <!-- MODAL DE CONFIRMACIÓN -->
+        <div id="modal-container" class="hidden absolute inset-0 bg-black/40 z-[60] items-center justify-center p-4 animate-fade-in-up">
+            <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-gray-100 flex flex-col max-h-[90vh]">
+                <h3 id="modal-title" class="text-xl font-bold text-gray-900 mb-4 flex-shrink-0">Confirmar Registro</h3>
+                
+                <div id="modal-content" class="overflow-y-auto hide-scrollbar flex-1 mb-4">
+                    <!-- Contenido dinámico del modal -->
+                </div>
+
+                <div class="flex justify-between space-x-2 flex-shrink-0 mt-2">
+                    <button onclick="closeModal()" class="flex-1 py-3 text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-xl font-semibold transition-colors">Cancelar</button>
+                    <button id="btn-edit-modal" onclick="enableModalEdit()" class="flex-1 py-3 text-zinc-700 bg-zinc-100 hover:bg-zinc-200 border border-zinc-200 rounded-xl font-semibold transition-colors">Editar</button>
+                    <button onclick="saveModalEvent()" class="flex-1 py-3 text-white bg-zinc-900 hover:bg-zinc-800 rounded-xl font-semibold transition-colors shadow-lg shadow-zinc-900/20">Aceptar</button>
+                </div>
+            </div>
+        </div>
+
     </div>
-  );
-}
+
+    <!-- LOGICA DE LA APLICACIÓN (JAVASCRIPT) -->
+    <script>
+        // --- CONSTANTES Y CONFIGURACIÓN ---
+        const API_KEY = ""; // El entorno provee la key en tiempo de ejecución.
+        const NOTIFICATION_LABELS = {
+            'none': 'Sin notificación',
+            '0m': 'A la hora exacta',
+            '5m': '5 min antes',
+            '15m': '15 min antes',
+            '30m': '30 min antes',
+            '1h': '1 hora antes',
+            '1d': '1 día antes'
+        };
+
+        // --- ESTADO GLOBAL DE LA APP ---
+        let state = {
+            currentDate: new Date(),
+            activeTab: 'agenda',
+            agendaView: 'day', // day, week, month, gantt
+            isRecording: false,
+            events: [
+                { id: 1, title: 'Reunión de Diseño UI', date: new Date().toISOString().split('T')[0], startTime: '09:00', duration: 60, type: 'Evento', notification: '15m' },
+                { id: 2, title: 'Revisar correos', date: new Date().toISOString().split('T')[0], startTime: '11:30', duration: 30, type: 'Tarea', notification: 'none' },
+                { id: 3, title: 'Almuerzo', date: new Date().toISOString().split('T')[0], startTime: '13:00', duration: 60, type: 'Evento', notification: '0m' },
+            ],
+            categories: ['Evento', 'Tarea'],
+            advisorMessages: [
+                { role: 'assistant', text: '¡Hola! Soy tu Coach de Productividad. Además de ayudarte a agendar, estoy aquí para optimizar tu tiempo. Puedes usar el botón superior para que analice tu día.' }
+            ],
+            pomodoroTime: 25 * 60,
+            isPomodoroActive: false,
+            pomodoroMode: 'focus', // focus, break
+            pomodoroInterval: null,
+            pendingEvent: null,
+            isEditingPending: false,
+            pendingNotes: ''
+        };
+
+        // --- UTILIDADES ---
+        const getWeekNumber = (date) => {
+            const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+            const dayNum = d.getUTCDay() || 7;
+            d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+            const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+            return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+        };
+
+        const formatDate = (date) => {
+            return date.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' }).replace(/^\w/, c => c.toUpperCase());
+        };
+
+        const formatTime = (hour, minute = '00') => `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+
+        const refreshIcons = () => lucide.createIcons();
+
+        // --- RENDERIZADO PRINCIPAL ---
+        function initApp() {
+            updateHeader();
+            renderActiveTab();
+            renderCoachMessages();
+            refreshIcons();
+        }
+
+        function updateHeader() {
+            document.getElementById('header-subtitle').innerText = `Semana ${getWeekNumber(state.currentDate)}`;
+            
+            // Ocultar cabecera en Coach o Pomodoro
+            const header = document.getElementById('main-header');
+            if (state.activeTab === 'coach' || state.activeTab === 'pomodoro') {
+                header.classList.add('hidden');
+            } else {
+                header.classList.remove('hidden');
+            }
+        }
+
+        function switchTab(tabId) {
+            state.activeTab = tabId;
+            
+            // Actualizar botones de navegación
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if (btn.dataset.tab === tabId) {
+                    btn.className = "nav-btn flex flex-col items-center p-2 transition-colors text-zinc-900";
+                    btn.querySelector('i').setAttribute('stroke-width', '2.5');
+                } else {
+                    btn.className = "nav-btn flex flex-col items-center p-2 transition-colors text-gray-400 hover:text-gray-600";
+                    btn.querySelector('i').setAttribute('stroke-width', '2');
+                }
+            });
+
+            // Mostrar/Ocultar contenedores
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+
+            updateHeader();
+            renderActiveTab();
+            refreshIcons();
+        }
+
+        function renderActiveTab() {
+            if (state.activeTab === 'agenda') renderAgenda();
+            if (state.activeTab === 'tasks') renderTasks();
+        }
+
+        // --- AGENDA LOGIC ---
+        function changeDate(days) {
+            state.currentDate.setDate(state.currentDate.getDate() + days);
+            renderAgenda();
+        }
+
+        function setAgendaView(view) {
+            state.agendaView = view;
+            
+            // Actualizar UI del selector
+            document.querySelectorAll('#agenda-view-selector button').forEach(btn => {
+                if (btn.dataset.view === view) {
+                    btn.className = "flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all bg-white text-zinc-900 shadow-sm border border-gray-200";
+                } else {
+                    btn.className = "flex-1 py-1.5 text-xs font-semibold rounded-lg transition-all text-gray-500 hover:text-gray-700";
+                }
+            });
+            renderAgenda();
+        }
+
+        function renderAgenda() {
+            // Textos de cabecera de agenda
+            const titleEl = document.getElementById('agenda-date-title');
+            if (state.agendaView === 'month') {
+                titleEl.innerText = state.currentDate.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }).replace(/^\w/, c => c.toUpperCase());
+            } else {
+                titleEl.innerText = formatDate(state.currentDate);
+            }
+            document.getElementById('agenda-week-subtitle').innerText = `Semana ${getWeekNumber(state.currentDate)}`;
+
+            const container = document.getElementById('agenda-container');
+            const todayStr = state.currentDate.toISOString().split('T')[0];
+            const todaysEvents = state.events.filter(e => e.date === todayStr);
+
+            let html = '';
+
+            if (state.agendaView === 'day') {
+                html += '<div class="relative mt-2">';
+                for (let hour = 0; hour < 24; hour++) {
+                    let hourEventsHtml = '';
+                    let eventsInThisHour = todaysEvents.filter(e => parseInt(e.startTime.split(':')[0]) === hour);
+                    
+                    eventsInThisHour.forEach(event => {
+                        const minutes = parseInt(event.startTime.split(':')[1]);
+                        const top = (minutes / 60) * 100;
+                        const height = (event.duration / 60) * 60;
+                        const isEvent = event.type === 'Evento' || event.type === 'event';
+                        
+                        hourEventsHtml += `
+                            <div class="absolute left-2 right-2 rounded-xl p-3 text-sm shadow-sm border transition-transform hover:scale-[1.01] z-10"
+                                 style="top: ${top}%; height: ${Math.max(height, 40)}px; 
+                                        background-color: ${isEvent ? '#F3F4F6' : '#EFF6FF'}; 
+                                        border-color: ${isEvent ? '#E5E7EB' : '#DBEAFE'}; 
+                                        border-left-width: 4px; 
+                                        border-left-color: ${isEvent ? '#9CA3AF' : '#3B82F6'};">
+                                <p class="font-semibold text-gray-800 leading-tight truncate">${event.title}</p>
+                                <p class="text-xs text-gray-500 mt-1">${event.startTime} - ${event.duration} min</p>
+                            </div>
+                        `;
+                    });
+
+                    html += `
+                        <div class="flex relative min-h-[60px] border-b border-gray-100/80">
+                            <div class="w-16 pt-2 text-xs text-gray-400 font-medium text-right pr-4">${formatTime(hour)}</div>
+                            <div class="flex-1 relative">${hourEventsHtml}</div>
+                        </div>
+                    `;
+                }
+
+                // Línea actual
+                if (state.currentDate.toDateString() === new Date().toDateString()) {
+                    const now = new Date();
+                    const topPos = (now.getHours() * 60) + now.getMinutes();
+                    html += `
+                        <div class="absolute left-16 right-0 border-t-2 border-red-400 z-20 flex items-center" style="top: ${topPos}px">
+                            <div class="w-2 h-2 rounded-full bg-red-400 -ml-1"></div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+
+            } else if (state.agendaView === 'week') {
+                const curr = new Date(state.currentDate);
+                const first = curr.getDate() - curr.getDay() + (curr.getDay() === 0 ? -6 : 1);
+                
+                html += '<div class="mt-4 space-y-3">';
+                for(let i=0; i<7; i++) {
+                    const day = new Date(new Date(curr).setDate(first + i));
+                    const dateStr = day.toISOString().split('T')[0];
+                    const dayEvents = state.events.filter(e => e.date === dateStr);
+                    const isToday = dateStr === new Date().toISOString().split('T')[0];
+                    
+                    let eventsHtml = dayEvents.length === 0 ? '<p class="text-xs text-gray-400 italic">Sin tareas</p>' : '';
+                    dayEvents.forEach(e => {
+                        const isEv = e.type === 'Evento' || e.type === 'event';
+                        eventsHtml += `
+                            <div class="text-sm px-3 py-2 bg-gray-100/80 rounded-xl truncate flex items-center mb-1">
+                                <span class="text-xs font-medium text-gray-500 w-12">${e.startTime}</span>
+                                <div class="w-1.5 h-1.5 rounded-full mr-2 ${isEv ? 'bg-gray-400' : 'bg-blue-400'}"></div>
+                                <span class="truncate">${e.title}</span>
+                            </div>
+                        `;
+                    });
+
+                    html += `
+                        <div class="p-4 rounded-2xl border shadow-sm ${isToday ? 'border-zinc-900 bg-gray-50/50' : 'border-gray-100 bg-white'}">
+                            <div class="flex justify-between items-center mb-3">
+                                <span class="font-semibold capitalize ${isToday ? 'text-zinc-900' : 'text-gray-700'}">${day.toLocaleDateString('es-ES', {weekday: 'long', day: 'numeric'})}</span>
+                                <span class="text-xs font-medium text-gray-400 bg-gray-100 px-2 py-1 rounded-full">${dayEvents.length}</span>
+                            </div>
+                            <div class="space-y-2">${eventsHtml}</div>
+                        </div>
+                    `;
+                }
+                html += '</div>';
+
+            } else if (state.agendaView === 'month') {
+                const year = state.currentDate.getFullYear();
+                const month = state.currentDate.getMonth();
+                const daysInMonth = new Date(year, month + 1, 0).getDate();
+                const firstDay = new Date(year, month, 1).getDay();
+                const offset = firstDay === 0 ? 6 : firstDay - 1;
+
+                html += `
+                    <div class="mt-4 bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                        <div class="grid grid-cols-7 gap-1 mb-2">
+                            ${['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => `<div class="text-center text-xs font-bold text-gray-400 pb-2">${d}</div>`).join('')}
+                        </div>
+                        <div class="grid grid-cols-7 gap-1">
+                `;
+                
+                for(let i=0; i<offset; i++) html += '<div class="h-14"></div>';
+                
+                for(let d=1; d<=daysInMonth; d++) {
+                    const dateStr = `${year}-${String(month+1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    const dayEvents = state.events.filter(e => e.date === dateStr);
+                    const isToday = dateStr === new Date().toISOString().split('T')[0];
+                    
+                    let dotsHtml = '';
+                    dayEvents.slice(0,3).forEach(e => {
+                        dotsHtml += `<div class="w-1.5 h-1.5 rounded-full ${isToday ? 'bg-white' : (e.type === 'Evento' || e.type === 'event' ? 'bg-gray-400' : 'bg-blue-400')}"></div>`;
+                    });
+                    if(dayEvents.length > 3) dotsHtml += '<span class="text-[8px] leading-none text-gray-400">+</span>';
+
+                    html += `
+                        <div class="h-14 rounded-xl p-1 flex flex-col items-center justify-start transition-colors ${isToday ? 'bg-zinc-900 text-white shadow-md' : 'bg-gray-50/50 hover:bg-gray-100 border border-gray-50'}">
+                            <span class="text-xs font-medium mt-1 ${isToday ? 'text-white' : 'text-gray-700'}">${d}</span>
+                            <div class="flex flex-wrap justify-center gap-0.5 mt-1 px-1 w-full overflow-hidden h-4">${dotsHtml}</div>
+                        </div>
+                    `;
+                }
+                html += '</div></div>';
+
+            } else if (state.agendaView === 'gantt') {
+                html += `
+                    <div class="mt-4 bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden flex flex-col">
+                        <div class="p-4 border-b border-gray-100 bg-gray-50/50">
+                            <h3 class="text-sm font-semibold text-gray-700">Línea de tiempo de hoy</h3>
+                        </div>
+                        <div class="overflow-x-auto hide-scrollbar relative p-4">
+                            <div class="min-w-[600px]">
+                                <div class="flex border-b border-gray-200 ml-28 pb-2">
+                `;
+                for(let h=6; h<=22; h++) html += `<div class="flex-1 text-xs text-gray-400 font-medium min-w-[45px] border-l border-gray-100 pl-1">${h}:00</div>`;
+                html += `</div><div class="mt-2 relative"><div class="absolute inset-0 ml-28 flex pointer-events-none">`;
+                for(let h=6; h<=22; h++) html += `<div class="flex-1 border-l border-gray-50 min-w-[45px]"></div>`;
+                html += `</div>`;
+
+                if(todaysEvents.length === 0) html += '<p class="text-sm text-gray-400 py-6 text-center">No hay eventos para graficar hoy.</p>';
+                
+                todaysEvents.sort((a,b) => a.startTime.localeCompare(b.startTime)).forEach(event => {
+                    const parts = event.startTime.split(':');
+                    const startHour = parseInt(parts[0]) + parseInt(parts[1])/60;
+                    const visibleStart = Math.max(0, startHour - 6); 
+                    const totalVisibleHours = 22 - 6 + 1; 
+                    const left = (visibleStart / totalVisibleHours) * 100;
+                    const width = (event.duration / 60 / totalVisibleHours) * 100;
+                    const isEv = event.type === 'Evento' || event.type === 'event';
+
+                    html += `
+                        <div class="flex items-center mt-3 h-10 relative z-10 hover:bg-gray-50 transition-colors rounded-lg">
+                            <div class="w-28 text-xs font-semibold text-gray-700 truncate pr-3 bg-white py-2">${event.title}</div>
+                            <div class="flex-1 relative h-full">
+                                ${startHour >= 6 && startHour <= 22 ? `
+                                    <div class="absolute h-7 top-1.5 rounded-md shadow-sm border ${isEv ? 'bg-gray-100 border-gray-200' : 'bg-blue-100 border-blue-200'} flex items-center px-2 overflow-hidden"
+                                         style="left: ${left}%; width: ${width}%; min-width: 20px;">
+                                        <span class="text-[10px] font-medium text-gray-600 truncate">${event.duration}m</span>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `;
+                });
+                html += '</div></div></div></div>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // --- TASKS LOGIC ---
+        function renderTasks() {
+            const container = document.getElementById('tasks-container');
+            const tasksList = state.events.filter(e => e.type !== 'Evento' && e.type !== 'event');
+            
+            if (tasksList.length === 0) {
+                container.innerHTML = '<p class="text-gray-400 text-center mt-10">No hay tareas pendientes.</p>';
+                return;
+            }
+
+            let html = '';
+            tasksList.forEach(task => {
+                html += `
+                    <div class="flex items-center p-4 bg-white border border-gray-100 rounded-2xl shadow-sm">
+                        <div class="w-5 h-5 rounded border-2 border-gray-300 mr-4 cursor-pointer hover:border-zinc-900 transition-colors" onclick="deleteTask(${task.id})"></div>
+                        <div>
+                            <p class="font-medium">${task.title}</p>
+                            <div class="flex items-center text-xs text-gray-400 mt-0.5 space-x-2">
+                                <span>${task.date} • ${task.startTime}</span>
+                                <span class="bg-blue-50 text-blue-600 px-1.5 rounded truncate max-w-[100px]">${task.type}</span>
+                            </div>
+                            ${task.notes ? `<p class="text-xs text-gray-500 mt-2 bg-gray-50 p-2 rounded-lg border border-gray-100 italic">${task.notes}</p>` : ''}
+                        </div>
+                    </div>
+                `;
+            });
+            container.innerHTML = html;
+        }
+
+        function deleteTask(id) {
+            state.events = state.events.filter(e => e.id !== id);
+            renderTasks();
+            if(state.activeTab === 'agenda') renderAgenda();
+        }
+
+        // --- POMODORO LOGIC ---
+        function updatePomodoroUI() {
+            const m = Math.floor(state.pomodoroTime / 60).toString().padStart(2, '0');
+            const s = (state.pomodoroTime % 60).toString().padStart(2, '0');
+            document.getElementById('pomodoro-timer-display').innerText = `${m}:${s}`;
+        }
+
+        function setPomodoroMode(mode) {
+            state.pomodoroMode = mode;
+            state.pomodoroTime = mode === 'focus' ? 25 * 60 : 5 * 60;
+            state.isPomodoroActive = false;
+            
+            document.getElementById('btn-focus-mode').className = `px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${mode === 'focus' ? 'bg-white text-zinc-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`;
+            document.getElementById('btn-break-mode').className = `px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${mode === 'break' ? 'bg-white text-zinc-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`;
+            
+            updatePomodoroStateUI();
+        }
+
+        function togglePomodoro() {
+            state.isPomodoroActive = !state.isPomodoroActive;
+            
+            if (state.isPomodoroActive) {
+                state.pomodoroInterval = setInterval(() => {
+                    if (state.pomodoroTime > 0) {
+                        state.pomodoroTime--;
+                        updatePomodoroUI();
+                    } else {
+                        clearInterval(state.pomodoroInterval);
+                        state.isPomodoroActive = false;
+                        
+                        if (state.pomodoroMode === 'focus') {
+                            setPomodoroMode('break');
+                            showVoiceFeedback('¡Buen trabajo! Hora de un breve descanso.');
+                        } else {
+                            setPomodoroMode('focus');
+                            showVoiceFeedback('Descanso terminado. ¡A enfocarse!');
+                        }
+                    }
+                }, 1000);
+            } else {
+                clearInterval(state.pomodoroInterval);
+            }
+            updatePomodoroStateUI();
+        }
+
+        function resetPomodoro() {
+            clearInterval(state.pomodoroInterval);
+            state.isPomodoroActive = false;
+            state.pomodoroTime = state.pomodoroMode === 'focus' ? 25 * 60 : 5 * 60;
+            updatePomodoroStateUI();
+        }
+
+        function updatePomodoroStateUI() {
+            updatePomodoroUI();
+            const btn = document.getElementById('btn-toggle-pomodoro');
+            const icon = document.getElementById('pomodoro-icon');
+            const ring = document.getElementById('pomodoro-ring');
+            
+            if (state.isPomodoroActive) {
+                btn.classList.replace('bg-zinc-900', 'bg-zinc-800');
+                btn.innerHTML = `<i data-lucide="pause" class="w-8 h-8"></i>`;
+                ring.classList.add('animate-[spin_10s_linear_infinite]');
+                ring.classList.remove('hidden');
+            } else {
+                btn.classList.replace('bg-zinc-800', 'bg-zinc-900');
+                btn.innerHTML = `<i data-lucide="play" class="w-8 h-8 ml-2" id="pomodoro-icon"></i>`;
+                ring.classList.remove('animate-[spin_10s_linear_infinite]');
+                ring.classList.add('hidden');
+            }
+            refreshIcons();
+        }
+
+        // --- COACH IA LOGIC ---
+        function renderCoachMessages() {
+            const container = document.getElementById('chat-messages-container');
+            container.innerHTML = state.advisorMessages.map(msg => `
+                <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up">
+                    <div class="max-w-[85%] rounded-2xl p-4 text-sm ${msg.role === 'user' ? 'bg-zinc-900 text-white rounded-br-none' : 'bg-gray-100 text-gray-800 rounded-bl-none'}">
+                        ${msg.text}
+                    </div>
+                </div>
+            `).join('');
+            
+            if (state.isProcessingVoice || document.getElementById('voice-loader').classList.contains('hidden') === false && state.activeTab === 'coach') {
+                container.innerHTML += `
+                    <div class="flex justify-start">
+                        <div class="bg-gray-100 rounded-2xl rounded-bl-none p-4 flex items-center space-x-2">
+                            <i data-lucide="loader-2" class="w-4 h-4 animate-spin text-gray-500"></i>
+                            <span class="text-sm text-gray-500">Analizando...</span>
+                        </div>
+                    </div>
+                `;
+            }
+            container.scrollTop = container.scrollHeight;
+            refreshIcons();
+        }
+
+        function handleChatKeyPress(e) {
+            if (e.key === 'Enter') handleAskAdvisor();
+        }
+
+        function handleAskAdvisor() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            input.value = '';
+            processUserIntent(text, false);
+        }
+
+        function handleAnalyzeDay() {
+            processUserIntent("Analiza mi agenda de hoy y dame 3 consejos rápidos como mi coach para optimizar mi tiempo y evitar el agotamiento mental.", false);
+        }
+
+        // --- IA & VOICE INTEGRATION ---
+        function showVoiceFeedback(text, isProcessing = false) {
+            const fb = document.getElementById('voice-feedback');
+            document.getElementById('voice-text').innerText = text;
+            fb.classList.remove('hidden');
+            
+            const loader = document.getElementById('voice-loader');
+            if (isProcessing) loader.classList.remove('hidden');
+            else loader.classList.add('hidden');
+
+            if(!isProcessing) {
+                setTimeout(() => fb.classList.add('hidden'), 3000);
+            }
+        }
+
+        function handleVoiceCommand() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                showVoiceFeedback("Tu navegador no soporta el reconocimiento de voz.");
+                return;
+            }
+
+            const recognition = new SpeechRecognition();
+            recognition.lang = 'es-ES';
+            recognition.interimResults = false;
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                state.isRecording = true;
+                showVoiceFeedback('Escuchando...', true);
+                document.getElementById('btn-mic').classList.replace('bg-zinc-900', 'bg-red-500');
+                document.getElementById('btn-mic').classList.add('animate-pulse', 'scale-110');
+            };
+
+            recognition.onresult = async (event) => {
+                const transcript = event.results[0][0].transcript;
+                showVoiceFeedback(`Procesando: "${transcript}"`, true);
+                await processUserIntent(transcript, true);
+            };
+
+            recognition.onerror = () => showVoiceFeedback('Error al escuchar. Intenta de nuevo.');
+            
+            recognition.onend = () => {
+                state.isRecording = false;
+                document.getElementById('btn-mic').classList.replace('bg-red-500', 'bg-zinc-900');
+                document.getElementById('btn-mic').classList.remove('animate-pulse', 'scale-110');
+            };
+
+            recognition.start();
+        }
+
+        async function processUserIntent(text, isVoice = false) {
+            if (!isVoice) {
+                state.advisorMessages.push({ role: 'user', text });
+                state.isProcessingVoice = true;
+                if(state.activeTab === 'coach') renderCoachMessages();
+            }
+
+            try {
+                const todayStr = state.currentDate.toISOString().split('T')[0];
+                const todaysEvents = state.events.filter(e => e.date === todayStr);
+                const eventsContext = JSON.stringify(todaysEvents);
+
+                const payload = {
+                    contents: [{ parts: [{ text: text }] }],
+                    systemInstruction: {
+                        parts: [{ text: `Eres un Coach de Productividad y organizador de tiempo personal minimalista. Fecha actual: ${todayStr}. Tu memoria de la agenda de hoy es: ${eventsContext}.
+                        INSTRUCCIONES:
+                        1. Si el usuario pide agendar, registrar o crear una actividad/tarea, extrae la información. Asume hoy si no dice fecha, y 60 min si no dice duración. Devuelve action="schedule", el objeto "event" con los datos, y en "message" pregúntale si desea agregar una nota adicional.
+                        2. Si pide análisis o consejo, evalúa su agenda: busca huecos, identifica saturación y sugiere usar Pomodoro o pausas. Devuelve action="chat".
+                        3. Preguntas generales: responde motivando. Devuelve action="chat".
+                        SIEMPRE responde ÚNICAMENTE con un JSON válido usando esta estructura:
+                        {
+                            "action": "schedule" o "chat",
+                            "message": "tu respuesta amigable",
+                            "event": { "title": "...", "date": "YYYY-MM-DD", "startTime": "HH:MM", "duration": 60, "type": "Evento", "notification": "15m" }
+                        }` }]
+                    },
+                    generationConfig: { responseMimeType: "application/json" }
+                };
+
+                const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const data = await response.json();
+                const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (resultText) {
+                    const parsedData = JSON.parse(resultText);
+                    
+                    state.advisorMessages.push({ role: 'assistant', text: parsedData.message });
+                    if (isVoice) switchTab('coach');
+
+                    if (parsedData.action === 'schedule' && parsedData.event) {
+                        state.pendingEvent = { 
+                            ...parsedData.event, 
+                            notification: parsedData.event.notification || '15m', 
+                            type: parsedData.event.type || 'Evento',
+                            id: Date.now() 
+                        };
+                        
+                        if (state.pendingEvent.type && !state.categories.includes(state.pendingEvent.type)) {
+                            state.categories.push(state.pendingEvent.type);
+                        }
+                        
+                        state.pendingNotes = '';
+                        state.isEditingPending = false;
+                        openModal();
+                        document.getElementById('voice-feedback').classList.add('hidden'); // ocultar loader flotante
+                    } else if (isVoice) {
+                        showVoiceFeedback('Respuesta en el Coach IA');
+                    }
+                }
+            } catch (error) {
+                console.error(error);
+                state.advisorMessages.push({ role: 'assistant', text: 'Lo siento, tuve un problema al procesar tu solicitud.' });
+                if (isVoice) showVoiceFeedback('Error al procesar.');
+            } finally {
+                state.isProcessingVoice = false;
+                if(state.activeTab === 'coach') renderCoachMessages();
+            }
+        }
+
+        // --- MODAL LOGIC ---
+        function openModal() {
+            document.getElementById('modal-container').classList.remove('hidden');
+            document.getElementById('modal-container').classList.add('flex');
+            renderModalContent();
+        }
+
+        function closeModal() {
+            document.getElementById('modal-container').classList.add('hidden');
+            document.getElementById('modal-container').classList.remove('flex');
+            state.pendingEvent = null;
+            state.advisorMessages.push({ role: 'assistant', text: 'Registro cancelado.' });
+            if(state.activeTab === 'coach') renderCoachMessages();
+        }
+
+        function enableModalEdit() {
+            state.isEditingPending = true;
+            renderModalContent();
+        }
+
+        function toggleNewCategory() {
+            state.isAddingCategory = true;
+            renderModalContent();
+            setTimeout(() => document.getElementById('new-cat-input').focus(), 50);
+        }
+
+        function saveNewCategory() {
+            const input = document.getElementById('new-cat-input');
+            const val = input.value.trim();
+            if(val) {
+                if(!state.categories.includes(val)) state.categories.push(val);
+                state.pendingEvent.type = val;
+            }
+            state.isAddingCategory = false;
+            renderModalContent();
+        }
+
+        // Función para sincronizar los inputs del modal con el estado ANTES de guardar
+        function syncModalState() {
+            if (state.isEditingPending) {
+                state.pendingEvent.title = document.getElementById('mod-title').value;
+                state.pendingEvent.date = document.getElementById('mod-date').value;
+                state.pendingEvent.startTime = document.getElementById('mod-time').value;
+                state.pendingEvent.duration = parseInt(document.getElementById('mod-duration').value) || 0;
+                
+                const typeSelect = document.getElementById('mod-type');
+                if(typeSelect) state.pendingEvent.type = typeSelect.value;
+                
+                state.pendingEvent.notification = document.getElementById('mod-notif').value;
+            }
+            state.pendingNotes = document.getElementById('mod-notes').value;
+        }
+
+        function saveModalEvent() {
+            syncModalState();
+            state.events.push({ ...state.pendingEvent, notes: state.pendingNotes });
+            
+            document.getElementById('modal-container').classList.add('hidden');
+            document.getElementById('modal-container').classList.remove('flex');
+            
+            state.advisorMessages.push({ role: 'assistant', text: '¡Excelente! Lo he guardado en tu agenda.' });
+            if(state.activeTab === 'coach') renderCoachMessages();
+            
+            state.pendingEvent = null;
+            if(state.activeTab === 'agenda') renderAgenda();
+            if(state.activeTab === 'tasks') renderTasks();
+        }
+
+        function renderModalContent() {
+            const content = document.getElementById('modal-content');
+            const btnEdit = document.getElementById('btn-edit-modal');
+            
+            document.getElementById('modal-title').innerText = state.isEditingPending ? 'Editar Registro' : 'Confirmar Registro';
+            btnEdit.style.display = state.isEditingPending ? 'none' : 'block';
+
+            let html = '';
+
+            if (state.isEditingPending) {
+                let typeHtml = '';
+                if (!state.isAddingCategory) {
+                    typeHtml = `<select id="mod-type" onchange="if(this.value==='ADD_NEW') toggleNewCategory()" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none">
+                        ${state.categories.map(c => `<option value="${c}" ${state.pendingEvent.type === c ? 'selected' : ''}>${c}</option>`).join('')}
+                        <option value="ADD_NEW">+ Nueva categoría...</option>
+                    </select>`;
+                } else {
+                    typeHtml = `<div class="flex items-center">
+                        <input type="text" id="new-cat-input" placeholder="Nuevo tipo" class="w-full bg-white border border-gray-200 p-2.5 rounded-l-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none text-sm" />
+                        <button onclick="saveNewCategory()" class="bg-zinc-900 text-white p-3 rounded-r-xl transition-colors hover:bg-zinc-800"><i data-lucide="check" class="w-4 h-4"></i></button>
+                    </div>`;
+                }
+
+                html = `
+                    <div class="space-y-3 mb-4">
+                        <div>
+                            <label class="text-xs font-semibold text-gray-500 uppercase">Título</label>
+                            <input id="mod-title" type="text" value="${state.pendingEvent.title}" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
+                        </div>
+                        <div class="flex space-x-3">
+                            <div class="flex-1">
+                                <label class="text-xs font-semibold text-gray-500 uppercase">Fecha</label>
+                                <input id="mod-date" type="date" value="${state.pendingEvent.date}" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
+                            </div>
+                            <div class="flex-1">
+                                <label class="text-xs font-semibold text-gray-500 uppercase">Hora</label>
+                                <input id="mod-time" type="time" value="${state.pendingEvent.startTime}" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
+                            </div>
+                        </div>
+                        <div class="flex space-x-3">
+                            <div class="flex-1">
+                                <label class="text-xs font-semibold text-gray-500 uppercase">Duración (min)</label>
+                                <input id="mod-duration" type="number" value="${state.pendingEvent.duration}" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none" />
+                            </div>
+                            <div class="flex-1">
+                                <label class="text-xs font-semibold text-gray-500 uppercase">Tipo</label>
+                                ${typeHtml}
+                            </div>
+                        </div>
+                        <div>
+                            <label class="text-xs font-semibold text-gray-500 uppercase">Notificación</label>
+                            <select id="mod-notif" class="w-full bg-gray-50 border border-gray-200 p-2.5 rounded-xl focus:ring-2 focus:ring-zinc-900 focus:outline-none">
+                                ${Object.entries(NOTIFICATION_LABELS).map(([val, label]) => `<option value="${val}" ${state.pendingEvent.notification === val ? 'selected' : ''}>${label}</option>`).join('')}
+                            </select>
+                        </div>
+                    </div>
+                `;
+            } else {
+                html = `
+                    <div class="space-y-2 mb-4 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                        <div class="flex items-start justify-between">
+                            <p class="font-bold text-gray-900">${state.pendingEvent.title}</p>
+                            <span class="text-[10px] font-bold uppercase tracking-wider bg-zinc-200 text-zinc-700 px-2 py-1 rounded-md truncate max-w-[100px]">${state.pendingEvent.type}</span>
+                        </div>
+                        <div class="flex flex-wrap items-center text-sm text-gray-600 mt-2 gap-3">
+                            <span class="flex items-center"><i data-lucide="calendar" class="w-3.5 h-3.5 mr-1"></i> ${state.pendingEvent.date}</span>
+                            <span class="flex items-center"><i data-lucide="clock" class="w-3.5 h-3.5 mr-1"></i> ${state.pendingEvent.startTime} (${state.pendingEvent.duration}m)</span>
+                            <span class="flex items-center w-full mt-1 text-xs"><i data-lucide="bell" class="w-3.5 h-3.5 mr-1"></i> Notificación: ${NOTIFICATION_LABELS[state.pendingEvent.notification || '15m']}</span>
+                        </div>
+                    </div>
+                `;
+            }
+
+            html += `
+                <div class="mt-4">
+                    <label class="text-xs font-semibold text-gray-500 uppercase flex items-center mb-1">
+                        <i data-lucide="align-left" class="w-3 h-3 mr-1"></i> Notas adicionales (Opcional)
+                    </label>
+                    <textarea id="mod-notes" placeholder="Ej: Llevar portátil, preparar informe..." class="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-zinc-900 focus:outline-none resize-none" rows="2">${state.pendingNotes}</textarea>
+                </div>
+            `;
+
+            content.innerHTML = html;
+            refreshIcons();
+        }
+
+        // Iniciar la aplicación cuando cargue el DOM
+        document.addEventListener('DOMContentLoaded', initApp);
+
+    </script>
+</body>
+</html>
