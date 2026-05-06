@@ -10,13 +10,24 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     
     <style>
-        @keyframes fadeInUp {
+        /* Animación para centrar el mensaje flotante de voz */
+        @keyframes floatUp {
             from { opacity: 0; transform: translate(-50%, 10px); }
             to { opacity: 1; transform: translate(-50%, 0); }
         }
-        .animate-fade-in-up {
-            animation: fadeInUp 0.3s ease-out forwards;
+        .animate-float-up {
+            animation: floatUp 0.3s ease-out forwards;
         }
+
+        /* Animación normal para el chat y el modal */
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-slide-up {
+            animation: slideUp 0.3s ease-out forwards;
+        }
+
         .pb-safe {
             padding-bottom: env(safe-area-inset-bottom, 20px);
         }
@@ -149,7 +160,7 @@
         </div>
 
         <!-- FEEDBACK DE VOZ FLOTANTE -->
-        <div id="voice-feedback" class="hidden absolute bottom-28 left-1/2 -translate-x-1/2 bg-zinc-900 text-white px-6 py-3 rounded-full shadow-lg flex items-center space-x-3 z-50 animate-fade-in-up w-max max-w-[90%]">
+        <div id="voice-feedback" class="hidden absolute bottom-28 left-1/2 -translate-x-1/2 bg-zinc-900 text-white px-6 py-3 rounded-full shadow-lg flex items-center space-x-3 z-50 animate-float-up w-max max-w-[90%]">
             <i data-lucide="loader-2" class="w-4 h-4 animate-spin hidden" id="voice-loader"></i>
             <span id="voice-text" class="text-sm font-medium truncate">Escuchando...</span>
         </div>
@@ -189,7 +200,7 @@
         </nav>
 
         <!-- MODAL DE CONFIRMACIÓN -->
-        <div id="modal-container" class="hidden absolute inset-0 bg-black/40 z-[60] items-center justify-center p-4 animate-fade-in-up">
+        <div id="modal-container" class="hidden absolute inset-0 bg-black/40 z-[60] items-center justify-center p-4 animate-slide-up">
             <div class="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl border border-gray-100 flex flex-col max-h-[90vh]">
                 <h3 id="modal-title" class="text-xl font-bold text-gray-900 mb-4 flex-shrink-0">Confirmar Registro</h3>
                 
@@ -298,6 +309,14 @@
                     if(icon) icon.setAttribute('stroke-width', '2');
                 }
             });
+
+            // Mover el micrófono hacia arriba en la pestaña Coach para que no tape el área de escritura
+            const micBtn = document.getElementById('btn-mic');
+            if (tabId === 'coach') {
+                micBtn.classList.replace('bottom-24', 'bottom-40');
+            } else {
+                micBtn.classList.replace('bottom-40', 'bottom-24');
+            }
 
             // Mostrar/Ocultar contenedores
             document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -623,7 +642,7 @@
         function renderCoachMessages() {
             const container = document.getElementById('chat-messages-container');
             container.innerHTML = state.advisorMessages.map(msg => `
-                <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-fade-in-up">
+                <div class="flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} animate-slide-up">
                     <div class="max-w-[85%] rounded-2xl p-4 text-sm ${msg.role === 'user' ? 'bg-zinc-900 text-white rounded-br-none' : 'bg-gray-100 text-gray-800 rounded-bl-none'}">
                         ${msg.text}
                     </div>
