@@ -287,12 +287,15 @@
             
             // Actualizar botones de navegación
             document.querySelectorAll('.nav-btn').forEach(btn => {
+                // CORRECCIÓN: Buscamos el <svg> porque la librería de íconos ya transformó el <i>
+                const icon = btn.querySelector('svg') || btn.querySelector('i');
+                
                 if (btn.dataset.tab === tabId) {
                     btn.className = "nav-btn flex flex-col items-center p-2 transition-colors text-zinc-900";
-                    btn.querySelector('i').setAttribute('stroke-width', '2.5');
+                    if(icon) icon.setAttribute('stroke-width', '2.5');
                 } else {
                     btn.className = "nav-btn flex flex-col items-center p-2 transition-colors text-gray-400 hover:text-gray-600";
-                    btn.querySelector('i').setAttribute('stroke-width', '2');
+                    if(icon) icon.setAttribute('stroke-width', '2');
                 }
             });
 
